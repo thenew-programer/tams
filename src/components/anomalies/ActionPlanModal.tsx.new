@@ -1,0 +1,729 @@
+import React, { useState, useEffect } from 'react';
+import { X, Plus, Trash2, Clock, Wrench, AlertTriangle, Save, Calendar, CheckCircle, Loader } from 'lucide-react';
+import { Button } from '../ui/Button';
+import { Input } from '../ui/Input';
+import { Select } from '../ui/Select';
+import { Card, CardContent } from '../ui/Card';
+import { Anomaly, ActionPlan, ActionItem } from '../../types';
+import { calculateActionPlanProgress } from '../../lib/planningUtils';
+import toast from 'react-hot-toast';
+import { supabaseActionPlanService } from '../../services/supabaseActionPlanService';
+
+interface ActionPlanModalProps {
+	isOpen: boolean;
+	onClose: () => void;
+	onSave: (actionPlan: ActionPlan) => void;
+	onUpdatePlanning?: (actionPlan: ActionPlan) => void;
+	anomaly: Anomaly;
+	existingActionPlan?: ActionPlan;
+}
+
+export const ActionPlanModal: React.FC<ActionPlanModalProps> = ({
+	isOpen,
+	onClose,
+	onSave,
+	onUpdatePlanning,
+	anomaly,
+	existingActionPlan
+}) => {
+	const [actionPlan, setActionPlan] = useState<ActionPlan>(
+		existingActionPlan || {
+			id: `plan-${Date.now()}`,
+			anomalyId: anomaly.id,
+			needsOutage: false,
+			actions: [],
+			totalDurationHours: 0,
+			totalDurationDays: 0,
+			estimatedCost: 0,
+			priority: 3,
+			comments: '',
+			createdAt: new Date(),
+			updatedAt: new Date(),
+			status: 'draft',
+			completionPercentage: 0
+		}
+	);
+	const [isLoading, setIsLoading] = useState(false);
+	const [isSaving, setIsSaving] = useState(false);
+
+	const [newAction, setNewAction] = useState<Partial<ActionItem>>({
+		action: '',
+		responsable: '',
+		pdrsDisponible: 'OUI',
+		ressourcesInternes: '',
+		ressourcesExternes: '',
+		statut: 'planifie',
+		dureeHeures: 0,
+		dureeJours: 0,
+		progression: 0
+	});
+
+	const responsableOptions = [
+		{ value: 'MC', label: 'MC - Maintenance Centrale' },
+		{ value: 'MP', label: 'MP - Maintenance Préventive' },
+		{ value: 'OP', label: 'OP - Opérateur' },
+		{ value: 'EXT', label: 'EXT - Prestataire Externe' },
+		{ value: 'ING', label: 'ING - Ingénieur' }
+	];
+
+
+	const statutOptions = [
+		{ value: 'planifie', label: 'Planifié' },
+		{ value: 'en_cours', label: 'En cours' },
+		{ value: 'termine', label: 'Terminé' },
+		{ value: 'reporte', label: 'Reporté' }
+	];
+
+	const outageTypeOptions = [
+		{ value: 'force', label: 'Arrêt Forcé (1-3 jours)' },
+		{ value: 'minor', label: 'Arrêt Mineur (3-7 jours)' },
+		{ value: 'major', label: 'Arrêt Majeur (14-42 jours)' }
+	];
+
+	useEffect(() => {
+		calculateTotalDuration();
+		updateCompletionPercentage();
+	}, [actionPlan.actions]);
+
+	const calculateTotalDuration = () => {
+		const totalHours = actionPlan.actions.reduce((sum, action) => sum + action.dureeHeures, 0);
+		const totalDays = actionPlan.actions.reduce((sum, action) => sum + action.dureeJours, 0);
+
+		setActionPlan(prev => ({
+			...prev,
+			totalDurationHours: totalHours,
+			totalDurationDays: totalDays,
+			updatedAt: new Date()
+		}));
+	};
+
+	const updateCompletionPercentage = () => {
+		const percentage = calculateActionPlanProgress(actionPlan);
+		setActionPlan(prev => ({
+			...prev,
+			completionPercentage: percentage
+		}));
+	};
+
+	const addAction = () => {
+		if (!newAction.action || !newAction.responsable) return;
+
+		// Create local action immediately for UI feedback
+		const action: ActionItem = {
+			id: `action-${Date.now()}`, // Temporary ID that will be replaced with UUID from database
+			action: newAction.action || '',
+			responsable: newAction.responsable || '',
+			pdrsDisponible: newAction.pdrsDisponible || 'OUI',
+			ressourcesInternes: newAction.ressourcesInternes || '',
+			ressourcesExternes: newAction.ressourcesExternes || '',
+			statut: newAction.statut || 'planifie',
+			dureeHeures: newAction.dureeHeures || 0,
+			dureeJours: newAction.dureeJours || 0,
+			progression: newAction.progression || 0
+		};
+
+		// Immediately update local state for better UX
+		setActionPlan(prev => ({
+			...prev,
+			actions: [...prev.actions, action]
+		}));
+		
+		// Clear the form
+		setNewAction({
+			action: '',
+			responsable: '',
+			pdrsDisponible: 'OUI',
+			ressourcesInternes: '',
+			ressourcesExternes: '',
+			statut: 'planifie',
+			dureeHeures: 0,
+			dureeJours: 0,
+			progression: 0
+		});
+	};
+
+	const removeAction = (actionId: string) => {
+		// Remove locally for immediate UI update
+		setActionPlan(prev => ({
+			...prev,
+			actions: prev.actions.filter(a => a.id !== actionId)
+		}));
+	};
+
+	const updateAction = (actionId: string, field: keyof ActionItem, value: any) => {
+		setActionPlan(prev => ({
+			...prev,
+			actions: prev.actions.map(action => {
+				if (action.id === actionId) {
+					const updatedAction = { ...action, [field]: value };
+
+					// Auto-update progression based on status
+					if (field === 'statut') {
+						switch (value) {
+							case 'planifie':
+								updatedAction.progression = 0;
+								break;
+							case 'en_cours':
+								updatedAction.progression = 50;
+								break;
+							case 'termine':
+								updatedAction.progression = 100;
+								break;
+							case 'reporte':
+								updatedAction.progression = 0;
+								break;
+						}
+					}
+
+					return updatedAction;
+				}
+				return action;
+			}),
+			updatedAt: new Date()
+		}));
+	};
+
+	const handleSave = async () => {
+		setIsSaving(true);
+		
+		try {
+			// Update status based on completion
+			let status: ActionPlan['status'] = 'draft';
+			if (actionPlan.completionPercentage === 100) {
+				status = 'completed';
+			} else if (actionPlan.completionPercentage > 0) {
+				status = 'in_progress';
+			} else if (actionPlan.actions.length > 0) {
+				status = 'approved';
+			}
+
+			const finalActionPlan = {
+				...actionPlan,
+				status,
+				updatedAt: new Date()
+			};
+
+			// If this is a new plan (not yet in database)
+			if (finalActionPlan.id.startsWith('plan-')) {
+				// Create a new action plan in the database
+				const createdPlan = await supabaseActionPlanService.createActionPlan({
+					anomalyId: anomaly.id,
+					needsOutage: finalActionPlan.needsOutage,
+					outageType: finalActionPlan.outageType,
+					outageDuration: finalActionPlan.outageDuration,
+					plannedDate: finalActionPlan.plannedDate,
+					estimatedCost: finalActionPlan.estimatedCost,
+					priority: finalActionPlan.priority,
+					comments: finalActionPlan.comments,
+					actions: finalActionPlan.actions.map(a => ({
+						action: a.action,
+						responsable: a.responsable,
+						pdrsDisponible: a.pdrsDisponible || 'OUI',
+						ressourcesInternes: a.ressourcesInternes || '',
+						ressourcesExternes: a.ressourcesExternes || '',
+						dureeHeures: a.dureeHeures,
+						dureeJours: a.dureeJours
+					}))
+				});
+				
+				if (createdPlan) {
+					// Pass the created plan back to the parent component
+					onSave(createdPlan);
+				} else {
+					throw new Error("Failed to save action plan");
+				}
+			} else {
+				// Plan already exists, update it
+				const updatedPlan = await supabaseActionPlanService.updateActionPlan(
+					finalActionPlan.id,
+					{
+						needsOutage: finalActionPlan.needsOutage,
+						outageType: finalActionPlan.outageType,
+						outageDuration: finalActionPlan.outageDuration,
+						plannedDate: finalActionPlan.plannedDate,
+						estimatedCost: finalActionPlan.estimatedCost,
+						priority: finalActionPlan.priority,
+						comments: finalActionPlan.comments,
+						status: status
+					}
+				);
+				
+				// Create or update all action items for this plan
+				if (updatedPlan) {
+					// First, clean up any temporary action items
+					// Only keep real db actions that are not being added/updated in this session
+					const existingDbActions = updatedPlan.actions.filter(a => !a.id.startsWith('action-'));
+					const existingDbActionIds = existingDbActions.map(a => a.id);
+					
+					// For each action in our current plan
+					for (const action of finalActionPlan.actions) {
+						// If it's a new action (temp ID), add it
+						if (action.id.startsWith('action-')) {
+							await supabaseActionPlanService.addActionItem(updatedPlan.id, {
+								action: action.action,
+								responsable: action.responsable,
+								pdrsDisponible: action.pdrsDisponible,
+								ressourcesInternes: action.ressourcesInternes || '',
+								ressourcesExternes: action.ressourcesExternes || '',
+								statut: action.statut,
+								dureeHeures: action.dureeHeures,
+								dureeJours: action.dureeJours,
+								dateDebut: action.dateDebut,
+								dateFin: action.dateFin
+							});
+						} 
+						// If it's an existing action, check if it was updated
+						else if (existingDbActionIds.includes(action.id)) {
+							const dbAction = existingDbActions.find(a => a.id === action.id);
+							const wasUpdated = 
+								dbAction?.action !== action.action ||
+								dbAction?.responsable !== action.responsable ||
+								dbAction?.pdrsDisponible !== action.pdrsDisponible ||
+								dbAction?.ressourcesInternes !== action.ressourcesInternes ||
+								dbAction?.ressourcesExternes !== action.ressourcesExternes ||
+								dbAction?.statut !== action.statut ||
+								dbAction?.dureeHeures !== action.dureeHeures ||
+								dbAction?.dureeJours !== action.dureeJours ||
+								dbAction?.dateDebut?.getTime() !== action.dateDebut?.getTime() ||
+								dbAction?.dateFin?.getTime() !== action.dateFin?.getTime() ||
+								dbAction?.progression !== action.progression;
+								
+							if (wasUpdated) {
+								// Update the action
+								await supabaseActionPlanService.updateActionItem(action.id, {
+									action: action.action,
+									responsable: action.responsable,
+									pdrsDisponible: action.pdrsDisponible,
+									ressourcesInternes: action.ressourcesInternes || '',
+									ressourcesExternes: action.ressourcesExternes || '',
+									statut: action.statut,
+									dureeHeures: action.dureeHeures,
+									dureeJours: action.dureeJours,
+									dateDebut: action.dateDebut,
+									dateFin: action.dateFin,
+									progression: action.progression
+								});
+							}
+						}
+					}
+					
+					// Check for deleted actions
+					const currentActionIds = finalActionPlan.actions.map(a => a.id);
+					for (const dbAction of existingDbActions) {
+						if (!currentActionIds.includes(dbAction.id)) {
+							// This action was deleted, remove it from the database
+							await supabaseActionPlanService.deleteActionItem(updatedPlan.id, dbAction.id);
+						}
+					}
+					
+					// Get the final updated plan
+					const finalUpdatedPlan = await supabaseActionPlanService.getActionPlan(anomaly.id);
+					if (finalUpdatedPlan) {
+						onSave(finalUpdatedPlan);
+					}
+				} else {
+					throw new Error("Failed to update action plan");
+				}
+			}
+
+			// Auto-update planning if outage is required
+			if (finalActionPlan.needsOutage && onUpdatePlanning) {
+				onUpdatePlanning(finalActionPlan);
+
+				if (finalActionPlan.outageType === 'force') {
+					toast.success('Plan d\'action sauvegardé et arrêt d\'urgence créé automatiquement');
+				} else {
+					toast.success('Plan d\'action sauvegardé et intégré au planning');
+				}
+			} else {
+				toast.success('Plan d\'action sauvegardé avec succès');
+			}
+
+			onClose();
+		} catch (error) {
+			console.error('Error saving action plan:', error);
+			toast.error('Erreur lors de la sauvegarde du plan d\'action');
+		} finally {
+			setIsSaving(false);
+		}
+	};
+
+	const getBadgeColor = (statut: string) => {
+		switch (statut) {
+			case 'planifie': return 'info';
+			case 'en_cours': return 'warning';
+			case 'termine': return 'success';
+			case 'reporte': return 'danger';
+			default: return 'default';
+		}
+	};
+
+	const getOutageDurationRange = (type: string) => {
+		switch (type) {
+			case 'force': return '1-3 jours';
+			case 'minor': return '3-7 jours';
+			case 'major': return '14-42 jours';
+			default: return '';
+		}
+	};
+
+	if (!isOpen) return null;
+
+	return (
+		<div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+			<div className="bg-white rounded-2xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-y-auto">
+				<div className="flex items-center justify-between p-6 border-b border-gray-200">
+					<div className="flex items-center space-x-3">
+						<Wrench className="w-6 h-6 text-blue-600" />
+						<div>
+							<h2 className="text-xl font-bold text-gray-900">Plan d'Action</h2>
+							<p className="text-sm text-gray-600">{anomaly.title}</p>
+						</div>
+					</div>
+					<Button variant="ghost" size="sm" onClick={onClose}>
+						<X className="w-5 h-5" />
+					</Button>
+				</div>
+
+				<div className="p-6 space-y-6">
+					{/* Besoin d'Arrêt */}
+					<Card>
+						<CardContent className="p-6">
+							<h3 className="text-lg font-semibold text-gray-900 mb-4">Planification d'Arrêt</h3>
+
+							<div className="space-y-4">
+								<div className="flex items-center space-x-4">
+									<label className="flex items-center space-x-2">
+										<input
+											type="checkbox"
+											checked={actionPlan.needsOutage}
+											onChange={(e) => setActionPlan(prev => ({ ...prev, needsOutage: e.target.checked }))}
+											className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+										/>
+										<span className="text-sm font-medium text-gray-700">Nécessite un arrêt de production</span>
+									</label>
+								</div>
+
+								{actionPlan.needsOutage && (
+									<div className="grid grid-cols-1 md:grid-cols-3 gap-4 p-4 bg-blue-50 rounded-lg">
+										<div>
+											<label className="block text-sm font-medium text-gray-700 mb-2">Type d'Arrêt</label>
+											<Select
+												options={outageTypeOptions}
+												value={actionPlan.outageType || ''}
+												onChange={(e) => setActionPlan(prev => ({ ...prev, outageType: e.target.value as any }))}
+											/>
+										</div>
+
+										<div>
+											<label className="block text-sm font-medium text-gray-700 mb-2">Durée Estimée (jours)</label>
+											<Input
+												type="number"
+												min="1"
+												max={actionPlan.outageType === 'force' ? '3' : actionPlan.outageType === 'minor' ? '7' : '42'}
+												value={actionPlan.outageDuration || ''}
+												onChange={(e) => setActionPlan(prev => ({ ...prev, outageDuration: parseInt(e.target.value) }))}
+											/>
+											{actionPlan.outageType && (
+												<p className="text-xs text-gray-500 mt-1">
+													Plage recommandée: {getOutageDurationRange(actionPlan.outageType)}
+												</p>
+											)}
+										</div>
+
+										<div>
+											<label className="block text-sm font-medium text-gray-700 mb-2">Date Planifiée</label>
+											<Input
+												type="date"
+												value={actionPlan.plannedDate ? actionPlan.plannedDate.toISOString().slice(0, 10) : ''}
+												onChange={(e) => setActionPlan(prev => ({
+													...prev,
+													plannedDate: e.target.value ? new Date(e.target.value) : undefined
+												}))}
+											/>
+										</div>
+									</div>
+								)}
+							</div>
+						</CardContent>
+					</Card>
+
+					{/* Actions */}
+					<Card>
+						<CardContent className="p-6">
+							<h3 className="text-lg font-semibold text-gray-900 mb-4">Actions à Réaliser</h3>
+
+							{/* Tableau des actions existantes */}
+							{actionPlan.actions.length > 0 && (
+								<div className="mb-6 overflow-x-auto">
+									<table className="min-w-full divide-y divide-gray-200">
+										<thead className="bg-gray-50">
+											<tr>
+												<th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+												<th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Responsable</th>
+												<th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ressources Int.</th>
+												<th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ressources Ext.</th>
+												<th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Statut</th>
+												<th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+											</tr>
+										</thead>
+										<tbody className="bg-white divide-y divide-gray-200">
+											{actionPlan.actions.map((action) => (
+												<tr key={action.id} className="hover:bg-gray-50">
+													<td className="px-4 py-3">
+														<div>
+															<input
+																type="text"
+																value={action.action}
+																onChange={(e) => updateAction(action.id, 'action', e.target.value)}
+																className="w-full text-sm border-none bg-transparent focus:outline-none focus:ring-1 focus:ring-blue-500 rounded px-2 py-1"
+															/>
+															<div className="mt-1 w-full bg-gray-200 rounded-full h-1">
+																<div
+																	className="bg-blue-600 h-1 rounded-full transition-all duration-300"
+																	style={{ width: `${action.progression}%` }}
+																></div>
+															</div>
+														</div>
+													</td>
+													<td className="px-4 py-3">
+														<select
+															value={action.responsable}
+															onChange={(e) => updateAction(action.id, 'responsable', e.target.value)}
+															className="text-sm border-none bg-transparent focus:outline-none focus:ring-1 focus:ring-blue-500 rounded px-2 py-1"
+														>
+															{responsableOptions.map(opt => (
+																<option key={opt.value} value={opt.value}>{opt.value}</option>
+															))}
+														</select>
+													</td>
+													<td className="px-4 py-3">
+														<input
+															type="text"
+															value={action.ressourcesInternes}
+															onChange={(e) => updateAction(action.id, 'ressourcesInternes', e.target.value)}
+															className="w-full text-sm border-none bg-transparent focus:outline-none focus:ring-1 focus:ring-blue-500 rounded px-2 py-1"
+															placeholder="Ex: 1 mécanicien"
+														/>
+													</td>
+													<td className="px-4 py-3">
+														<input
+															type="text"
+															value={action.ressourcesExternes}
+															onChange={(e) => updateAction(action.id, 'ressourcesExternes', e.target.value)}
+															className="w-full text-sm border-none bg-transparent focus:outline-none focus:ring-1 focus:ring-blue-500 rounded px-2 py-1"
+															placeholder="Ex: 1 chaudronnier"
+														/>
+													</td>
+													<td className="px-4 py-3">
+														<div>
+															<select
+																value={action.statut}
+																onChange={(e) => updateAction(action.id, 'statut', e.target.value)}
+																className="text-sm border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500"
+															>
+																{statutOptions.map(opt => (
+																	<option key={opt.value} value={opt.value}>{opt.label}</option>
+																))}
+															</select>
+														</div>
+													</td>
+													<td className="px-4 py-3">
+														<div className="flex space-x-1">
+															<input
+																type="number"
+																min="0"
+																value={action.dureeJours}
+																onChange={(e) => updateAction(action.id, 'dureeJours', parseInt(e.target.value) || 0)}
+																className="w-12 text-xs border border-gray-300 rounded px-1 py-1"
+																placeholder="J"
+															/>
+															<input
+																type="number"
+																min="0"
+																max="23"
+																value={action.dureeHeures}
+																onChange={(e) => updateAction(action.id, 'dureeHeures', parseInt(e.target.value) || 0)}
+																className="w-12 text-xs border border-gray-300 rounded px-1 py-1"
+																placeholder="H"
+															/>
+														</div>
+													</td>
+													<td className="px-4 py-3">
+														<Button
+															variant="ghost"
+															size="sm"
+															onClick={() => removeAction(action.id)}
+															className="text-red-600 hover:text-red-800"
+														>
+															<Trash2 className="w-4 h-4" />
+														</Button>
+													</td>
+												</tr>
+											))}
+										</tbody>
+									</table>
+								</div>
+							)}
+
+							{/* Formulaire nouvelle action */}
+							<div className="border-2 border-dashed border-gray-300 rounded-lg p-4">
+								<h4 className="text-sm font-medium text-gray-900 mb-3">Ajouter une nouvelle action</h4>
+								<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+									<div className="lg:col-span-2">
+										<Input
+											placeholder="Description de l'action"
+											value={newAction.action || ''}
+											onChange={(e) => setNewAction(prev => ({ ...prev, action: e.target.value }))}
+										/>
+									</div>
+									<div>
+										<Select
+											options={responsableOptions}
+											value={newAction.responsable || ''}
+											onChange={(e) => setNewAction(prev => ({ ...prev, responsable: e.target.value }))}
+										/>
+									</div>
+									<div>
+										<Input
+											placeholder="Ressources internes"
+											value={newAction.ressourcesInternes || ''}
+											onChange={(e) => setNewAction(prev => ({ ...prev, ressourcesInternes: e.target.value }))}
+										/>
+									</div>
+									<div>
+										<Input
+											placeholder="Ressources externes"
+											value={newAction.ressourcesExternes || ''}
+											onChange={(e) => setNewAction(prev => ({ ...prev, ressourcesExternes: e.target.value }))}
+										/>
+									</div>
+									<div className="flex space-x-2">
+										<Input
+											type="number"
+											min="0"
+											placeholder="Jours"
+											value={newAction.dureeJours || ''}
+											onChange={(e) => setNewAction(prev => ({ ...prev, dureeJours: parseInt(e.target.value) || 0 }))}
+										/>
+										<Input
+											type="number"
+											min="0"
+											max="23"
+											placeholder="Heures"
+											value={newAction.dureeHeures || ''}
+											onChange={(e) => setNewAction(prev => ({ ...prev, dureeHeures: parseInt(e.target.value) || 0 }))}
+										/>
+									</div>
+									<div>
+										<Button 
+											onClick={addAction} 
+											disabled={!newAction.action || !newAction.responsable}
+										>
+											<Plus className="w-4 h-4 mr-2" />
+											Ajouter
+										</Button>
+									</div>
+								</div>
+							</div>
+						</CardContent>
+					</Card>
+
+					{/* Résumé */}
+					<Card>
+						<CardContent className="p-6">
+							<h2 className="text-sm font-medium text-gray-900 mb-2">Résumé des Actions</h2>
+							{/* Actions Summary */}
+							<div className="mb-4">
+								<div className="grid grid-cols-4 gap-2 text-center">
+									<div className="bg-blue-50 p-2 rounded">
+										<div className="text-lg font-bold text-blue-900">
+											{actionPlan.actions.filter(a => a.statut === 'planifie').length}
+										</div>
+										<div className="text-xs text-blue-600">Planifiées</div>
+									</div>
+									<div className="bg-yellow-50 p-2 rounded">
+										<div className="text-lg font-bold text-yellow-900">
+											{actionPlan.actions.filter(a => a.statut === 'en_cours').length}
+										</div>
+										<div className="text-xs text-yellow-600">En cours</div>
+									</div>
+									<div className="bg-green-50 p-2 rounded">
+										<div className="text-lg font-bold text-green-900">
+											{actionPlan.actions.filter(a => a.statut === 'termine').length}
+										</div>
+										<div className="text-xs text-green-600">Terminées</div>
+									</div>
+									<div className="bg-red-50 p-2 rounded">
+										<div className="text-lg font-bold text-red-900">
+											{actionPlan.actions.filter(a => a.statut === 'reporte').length}
+										</div>
+										<div className="text-xs text-red-600">Reportées</div>
+									</div>
+								</div>
+							</div>
+
+							<div>
+								<label className="block text-sm font-medium text-gray-700 mb-2">Commentaires</label>
+								<textarea
+									value={actionPlan.comments}
+									onChange={(e) => setActionPlan(prev => ({ ...prev, comments: e.target.value }))}
+									rows={3}
+									className="block w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+									placeholder="Commentaires additionnels sur le plan d'action..."
+								/>
+							</div>
+						</CardContent>
+					</Card>
+
+					{/* Planning Integration Alert */}
+					{actionPlan.needsOutage && (
+						<div className={`p-4 rounded-lg border ${actionPlan.outageType === 'force'
+							? 'bg-red-50 border-red-200'
+							: 'bg-blue-50 border-blue-200'
+							}`}>
+							<div className="flex items-center space-x-2">
+								<AlertTriangle className={`w-5 h-5 ${actionPlan.outageType === 'force' ? 'text-red-600' : 'text-blue-600'
+									}`} />
+								<span className={`font-medium ${actionPlan.outageType === 'force' ? 'text-red-900' : 'text-blue-900'
+									}`}>
+									{actionPlan.outageType === 'force'
+										? 'Arrêt d\'urgence - Sera créé automatiquement'
+										: 'Sera intégré au planning existant ou créera un nouvel arrêt'
+									}
+								</span>
+							</div>
+							<p className={`text-sm mt-1 ${actionPlan.outageType === 'force' ? 'text-red-700' : 'text-blue-700'
+								}`}>
+								{actionPlan.outageType === 'force'
+									? 'Un arrêt d\'urgence sera automatiquement ajouté au planning lors de la sauvegarde.'
+									: 'Le système recherchera automatiquement un créneau compatible ou créera un nouvel arrêt.'
+								}
+							</p>
+						</div>
+					)}
+
+					{/* Actions */}
+					<div className="flex justify-end space-x-3 pt-4 border-t border-gray-200">
+						<Button variant="outline" onClick={onClose} disabled={isSaving}>
+							Annuler
+						</Button>
+						<Button onClick={handleSave} disabled={isSaving}>
+							{isSaving ? (
+								<>
+									<Loader className="w-4 h-4 mr-2 animate-spin" />
+									Sauvegarde...
+								</>
+							) : (
+								<>
+									<Save className="w-4 h-4 mr-2" />
+									Sauvegarder le Plan
+								</>
+							)}
+						</Button>
+					</div>
+				</div>
+			</div>
+		</div>
+	);
+};
